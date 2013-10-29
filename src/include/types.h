@@ -88,26 +88,17 @@ typedef off_t off64_t;
 
 
 CEPH_HASH_NAMESPACE_START
+/*
+ * On linux with tr1::unordered_map this definition is here, but on Mavericks
+ * with c++11 we need to define it.
+ */
+#ifdef _LIBCPP_VERSION
   template<> struct hash< std::string >
   {
     size_t operator()( const std::string& x ) const
     {
       static hash<const char*> H;
       return H(x.c_str());
-    }
-  };
-
-#ifndef __LP64__
-  template<> struct hash<int64_t> {
-    size_t operator()(int64_t __x) const { 
-      static hash<int32_t> H;
-      return H((__x >> 32) ^ (__x & 0xffffffff)); 
-    }
-  };
-  template<> struct hash<uint64_t> {
-    size_t operator()(uint64_t __x) const { 
-      static hash<uint32_t> H;
-      return H((__x >> 32) ^ (__x & 0xffffffff)); 
     }
   };
 #endif
