@@ -9625,7 +9625,8 @@ int ReplicatedPG::recover_backfill(
       if (i->first > pinfo.last_backfill)
         pinfo.stats.add(i->second);
     }
-    new_last_backfill = i->first;
+    if (i->first.is_head_or_snapdir())
+      new_last_backfill = i->first;
   }
   dout(10) << "possible new_last_backfill at " << new_last_backfill << dendl;
 
@@ -9639,8 +9640,6 @@ int ReplicatedPG::recover_backfill(
   if (last_backfill_started.is_snapdir())
     last_backfill_started = last_backfill_started.get_head();
 
-  assert(!pending_backfill_updates.empty() ||
-	 new_last_backfill == last_backfill_started);
   if (pending_backfill_updates.empty() &&
       backfill_pos.is_max()) {
     assert(backfills_in_flight.empty());
