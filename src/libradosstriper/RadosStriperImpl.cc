@@ -596,22 +596,14 @@ int libradosstriper::RadosStriperImpl::stat(const std::string& soid, uint64_t *p
 
 static void rados_req_remove_complete(rados_completion_t c, void *arg)
 {
-  libradosstriper::RadosStriperImpl::RemoveCompletionData *cdata =
-    reinterpret_cast<libradosstriper::RadosStriperImpl::RemoveCompletionData*>(arg);
-  libradosstriper::MultiAioCompletionImpl *comp =
+  libradosstriper::MultiAioCompletionImpl *cdata =
     reinterpret_cast<libradosstriper::MultiAioCompletionImpl*>(arg);
   int rc = rados_aio_get_return_value(c);
   // in case the object did not exist, it means we had a sparse file, all is fine
   if (rc == -ENOENT) {
     rc = 0;
   }
-  if (rc < 0) {
-    lderr(cdata->m_striper->cct())
-      << "RadosStriperImpl : deletion/truncation incomplete for " << cdata->m_soid
-      << ", as some rados object could not be deleted (rc=" << rc << ")"
-      << dendl;
-  }
-  comp->complete_request(rc);
+  cdata->complete_request(rc);
 }
 
 static void striper_remove_aio_req_complete(rados_striper_multi_completion_t c, void *arg)
