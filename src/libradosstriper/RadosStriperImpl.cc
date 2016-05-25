@@ -596,14 +596,15 @@ int libradosstriper::RadosStriperImpl::stat(const std::string& soid, uint64_t *p
 
 static void rados_req_remove_complete(rados_completion_t c, void *arg)
 {
-  libradosstriper::MultiAioCompletionImpl *cdata =
-    reinterpret_cast<libradosstriper::MultiAioCompletionImpl*>(arg);
+  libradosstriper::RadosStriperImpl::RadosRemoveCompletionData *cdata =
+    reinterpret_cast<libradosstriper::RadosStriperImpl::RadosRemoveCompletionData*>(arg);
   int rc = rados_aio_get_return_value(c);
   // in case the object did not exist, it means we had a sparse file, all is fine
   if (rc == -ENOENT) {
     rc = 0;
   }
-  cdata->complete_request(rc);
+  cdata->m_multiAioCompl->complete_request(rc);
+  cdata -> put();
 }
 
 static void striper_remove_aio_req_complete(rados_striper_multi_completion_t c, void *arg)
@@ -612,6 +613,9 @@ static void striper_remove_aio_req_complete(rados_striper_multi_completion_t c, 
     reinterpret_cast<libradosstriper::RadosStriperImpl::RemoveCompletionData*>(arg);
   libradosstriper::MultiAioCompletionImpl *comp =
     reinterpret_cast<libradosstriper::MultiAioCompletionImpl*>(c);
+  ldout(cdata->m_striper->cct(), 10)
+    << "RadosStriperImpl : striper_remove_aio_req_complete called for "
+    << cdata->m_soid << dendl;
   int rc = comp->rval;
   if (rc == 0) {
     // All went fine, synchronously remove first object
@@ -711,8 +715,10 @@ int libradosstriper::RadosStriperImpl::internal_aio_remove
     int rcr = 0;
     for (int i = nb_objects-1; i >= 1; i--) {
       multi_completion->add_request();
+      RadosRemoveCompletionData *data =
+	new RadosRemoveCompletionData(multi_completion, cct());
       librados::AioCompletion *rados_completion =
-	librados::Rados::aio_create_completion(multi_completion,
+	librados::Rados::aio_create_completion(data,
 					       rados_req_remove_complete, 0);
       if (flags == 0) {
         rcr = m_ioCtx.aio_remove(getObjectId(soid, i), rados_completion);

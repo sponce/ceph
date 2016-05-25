@@ -121,6 +121,20 @@ struct libradosstriper::RadosStriperImpl {
   };
 
   /**
+   * struct handling the data needed to pass to the call back
+   * function in asynchronous remove operations of a Rados File
+   */
+  struct RadosRemoveCompletionData : RefCountedObject {
+    /// constructor
+    RadosRemoveCompletionData(MultiAioCompletionImpl *multiAioCompl,
+			      CephContext *context) :
+      RefCountedObject(context, 1),
+      m_multiAioCompl(multiAioCompl) {};
+    /// the multi asynch io completion object to be used
+    MultiAioCompletionImpl *m_multiAioCompl;
+  };
+
+  /**
    * Helper struct to handle simple locks on objects
    */
   struct RadosExclusiveLock {
