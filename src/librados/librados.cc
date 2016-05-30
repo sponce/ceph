@@ -1843,6 +1843,34 @@ int librados::IoCtx::aio_flush()
   return 0;
 }
 
+int librados::IoCtx::aio_getxattr(const std::string& oid, AioCompletion *c,
+				  const char *name, bufferlist& bl)
+{
+  object_t obj(oid);
+  return io_ctx_impl->aio_getxattr(obj, c->pc, name, bl);
+}
+
+int librados::IoCtx::aio_getxattrs(const std::string& oid, AioCompletion *c,
+				   map<std::string, bufferlist>& attrset)
+{
+  object_t obj(oid);
+  return io_ctx_impl->aio_getxattrs(obj, c->pc, attrset);
+}
+
+int librados::IoCtx::aio_setxattr(const std::string& oid, AioCompletion *c,
+				  const char *name, bufferlist& bl)
+{
+  object_t obj(oid);
+  return io_ctx_impl->aio_setxattr(obj, c->pc, name, bl);
+}
+
+int librados::IoCtx::aio_rmxattr(const std::string& oid, AioCompletion *c,
+				 const char *name)
+{
+  object_t obj(oid);
+  return io_ctx_impl->aio_rmxattr(obj, c->pc, name);
+}
+
 int librados::IoCtx::aio_stat(const std::string& oid, librados::AioCompletion *c,
 			      uint64_t *psize, time_t *pmtime)
 {
@@ -4396,6 +4424,123 @@ extern "C" int rados_aio_flush(rados_ioctx_t io)
   ctx->flush_aio_writes();
   tracepoint(librados, rados_aio_flush_exit, 0);
   return 0;
+}
+
+struct AioGetxattrData {
+  AioGetxattrData(char* buf, rados_completion_t c, size_t l) :
+    user_buf(buf), len(l), user_completion((librados::AioCompletionImpl*)c) {}
+  bufferlist bl;
+  char* user_buf;
+  size_t len;
+  struct librados::C_AioComplete user_completion;
+};
+
+static void rados_aio_getxattr_complete(rados_completion_t c, void *arg) {
+  AioGetxattrData *cdata = reinterpret_cast<AioGetxattrData*>(arg);
+  int rc = rados_aio_get_return_value(c);
+  if (rc >= 0) {
+    if (cdata->bl.length() > cdata->len) {
+      rc = -ERANGE;
+    } else {
+      if (!cdata->bl.is_provided_buffer(cdata->user_buf))
+	cdata->bl.copy(0, cdata->bl.length(), cdata->user_buf);
+      rc = cdata->bl.length();
+    }
+  }
+  cdata->user_completion.finish(rc);
+  delete cdata;
+}
+
+extern "C" int rados_aio_getxattr(rados_ioctx_t io, const char *o,
+				  rados_completion_t completion,
+				  const char *name, char *buf, size_t len)
+{
+  tracepoint(librados, rados_aio_getxattr_enter, io, o, completion, name, len);
+  // create data object to be passed to async callback
+  AioGetxattrData *cdata = new AioGetxattrData(buf, completion, len);
+  if (!cdata) {
+    tracepoint(librados, rados_aio_getxattr_exit, -ENOMEM, NULL, 0);
+    return -ENOMEM;
+  }
+  cdata->bl.push_back(buffer::create_static(len, buf));
+  // create completion callback
+  librados::AioCompletionImpl *c = new librados::AioCompletionImpl;
+  c->set_complete_callback(cdata, rados_aio_getxattr_complete);
+  // call async getxattr of IoCtx
+  librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
+  object_t oid(o);
+  int ret = ctx->aio_getxattr(oid, c, name, cdata->bl);
+  tracepoint(librados, rados_aio_getxattr_exit, ret, buf, ret);
+  return ret;
+}
+
+struct AioGetxattrsData {
+  AioGetxattrsData(rados_completion_t c, rados_xattrs_iter_t *_iter) :
+    iter(_iter), user_completion((librados::AioCompletionImpl*)c) {}
+  librados::RadosXattrsIter it;
+  rados_xattrs_iter_t *iter;
+  struct librados::C_AioComplete user_completion;
+};
+
+static void rados_aio_getxattrs_complete(rados_completion_t c, void *arg) {
+  AioGetxattrsData *cdata = reinterpret_cast<AioGetxattrsData*>(arg);
+  int rc = rados_aio_get_return_value(c);
+  if (rc) {
+    cdata->user_completion.finish(rc);
+  } else {
+    cdata->it.i = cdata->it.attrset.begin();
+    *cdata->iter = &cdata->it;
+    cdata->user_completion.finish(0);
+  }
+  delete cdata;
+}
+
+extern "C" int rados_aio_getxattrs(rados_ioctx_t io, const char *oid,
+				   rados_completion_t completion,
+				   rados_xattrs_iter_t *iter)
+{
+  tracepoint(librados, rados_aio_getxattrs_enter, io, oid, completion);
+  // create data object to be passed to async callback
+  AioGetxattrsData *cdata = new AioGetxattrsData(completion, iter);
+  if (!cdata) {
+    tracepoint(librados, rados_getxattrs_exit, -ENOMEM, NULL);
+    return -ENOMEM;
+  }
+  // create completion callback
+  librados::AioCompletionImpl *c = new librados::AioCompletionImpl;
+  c->set_complete_callback(cdata, rados_aio_getxattrs_complete);
+  // call async getxattrs of IoCtx
+  librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
+  object_t obj(oid);
+  int ret = ctx->aio_getxattrs(obj, c, cdata->it.attrset);
+  tracepoint(librados, rados_aio_getxattrs_exit, ret, &cdata->it);
+  return ret;
+}
+
+extern "C" int rados_aio_setxattr(rados_ioctx_t io, const char *o,
+				  rados_completion_t completion,
+				  const char *name, const char *buf, size_t len)
+{
+  tracepoint(librados, rados_aio_setxattr_enter, io, o, completion, name, buf, len);
+  librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
+  object_t oid(o);
+  bufferlist bl;
+  bl.append(buf, len);
+  int retval = ctx->aio_setxattr(oid, (librados::AioCompletionImpl*)completion, name, bl);
+  tracepoint(librados, rados_aio_setxattr_exit, retval);
+  return retval;
+}
+
+extern "C" int rados_aio_rmxattr(rados_ioctx_t io, const char *o,
+				 rados_completion_t completion,
+				 const char *name)
+{
+  tracepoint(librados, rados_aio_rmxattr_enter, io, o, completion, name);
+  librados::IoCtxImpl *ctx = (librados::IoCtxImpl *)io;
+  object_t oid(o);
+  int retval = ctx->aio_rmxattr(oid, (librados::AioCompletionImpl*)completion, name);
+  tracepoint(librados, rados_aio_rmxattr_exit, retval);
+  return retval;
 }
 
 extern "C" int rados_aio_stat(rados_ioctx_t io, const char *o, 

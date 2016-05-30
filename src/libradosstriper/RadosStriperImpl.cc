@@ -76,7 +76,6 @@
  *
  * There are a number of missing features/improvements that could be implemented.
  * Here are some ideas :
- *    - asynchronous stat
  *    - implementation of missing entry points (compared to rados)
  *      In particular : clone_range, sparse_read, exec, aio_flush_async, tmaps, omaps, ...
  *
@@ -574,24 +573,140 @@ int libradosstriper::RadosStriperImpl::aio_flush()
 
 int libradosstriper::RadosStriperImpl::stat(const std::string& soid, uint64_t *psize, time_t *pmtime)
 {
-  // get pmtime as the pmtime of the first object
-  std::string firstObjOid = getObjectId(soid, 0);
-  uint64_t obj_size;
-  int rc = m_ioCtx.stat(firstObjOid, &obj_size, pmtime);
-  if (rc < 0) return rc;
-  // get the pmsize from the first object attributes
-  bufferlist bl;
-  rc = getxattr(soid, XATTR_SIZE, bl);
-  if (rc < 0) return rc;
-  std::string err;
-  // this intermediate string allows to add a null terminator before calling strtol
-  std::string strsize(bl.c_str(), bl.length());
-  *psize = strict_strtoll(strsize.c_str(), 10, &err);
-  if (!err.empty()) {
-    lderr(cct()) << XATTR_SIZE << " : " << err << dendl;
-    return -EINVAL;
+  // create a completion object
+  librados::AioCompletionImpl c;
+  // call asynchronous version of stat
+  int rc = aio_stat(soid, &c, psize, pmtime);
+  if (rc == 0) {
+    // wait for completion of the remove
+    c.wait_for_complete_and_cb();
+    // get result
+    rc = c.get_return_value();
   }
-  return 0;
+  return rc;
+}
+
+static void striper_stat_aio_stat_complete(rados_completion_t c, void *arg) {
+  libradosstriper::RadosStriperImpl::BasicStatCompletionData *data =
+  reinterpret_cast<libradosstriper::RadosStriperImpl::BasicStatCompletionData*>(arg);
+  int rc = rados_aio_get_return_value(c);
+  if (rc == -ENOENT) {
+    // remember this has failed
+    data->m_statRC = rc;
+  }
+  ((librados::AioCompletionImpl*)c)->put();
+  data->m_multiCompletion->complete();
+}
+
+static void striper_stat_aio_getxattr_complete(rados_completion_t c, void *arg) {
+  libradosstriper::RadosStriperImpl::BasicStatCompletionData *data =
+  reinterpret_cast<libradosstriper::RadosStriperImpl::BasicStatCompletionData*>(arg);
+  int rc = rados_aio_get_return_value(c);
+  // We need to handle the case of sparse files here
+  if (rc) {
+    // remember this has failed
+    data->m_getxattrRC = rc;
+  } else {
+    // this intermediate string allows to add a null terminator before calling strtol
+    std::string err;
+    std::string strsize(data->m_bl.c_str(), data->m_bl.length());
+    *data->m_psize = strict_strtoll(strsize.c_str(), 10, &err);
+    if (!err.empty()) {
+      lderr(data->m_striper->cct()) << XATTR_SIZE << " : " << err << dendl;
+      data->m_getxattrRC = -EINVAL;
+    }
+  }
+  ((librados::AioCompletionImpl*)c)->put();  
+  data->m_multiCompletion->complete();
+}
+
+static void striper_stat_aio_req_complete(rados_striper_multi_completion_t c,
+					  void *arg) {
+  libradosstriper::RadosStriperImpl::BasicStatCompletionData *data =
+  reinterpret_cast<libradosstriper::RadosStriperImpl::BasicStatCompletionData*>(arg);
+  data->complete(data->m_statRC ? data->m_statRC : data->m_getxattrRC);
+  data->put();
+}
+
+template<TimeType, statFunction>
+int libradosstriper::RadosStriperImpl::aio_generic_stat(const std::string& soid,
+							librados::AioCompletion *c,
+							uint64_t *psize,
+							TimeType *pmtime)
+{
+  // use a MultiAioCompletion object for dealing with the fact
+  // that we'll do 2 asynchronous calls in parallel
+  libradosstriper::MultiAioCompletionImpl *multi_completion =
+    new libradosstriper::MultiAioCompletionImpl;
+  // Data object used for passing context to asynchronous calls
+  std::string firstObjOid = getObjectId(soid, 0);
+  StatCompletionData<TimeType> *cdata =
+    new StatCompletionData<TimeType>(this, firstObjOid, c,
+				     multi_completion, psize, pmtime);
+  multi_completion->set_complete_callback(cdata, striper_stat_aio_req_complete);
+  // use a regular AioCompletion for the stat async call
+  librados::AioCompletion *stat_completion =
+    librados::Rados::aio_create_completion(cdata,
+					   striper_stat_aio_stat_complete, 0);
+  multi_completion->add_request();
+  int rc = m_ioCtx.statFunction(firstObjOid, stat_completion,
+				&cdata->m_objectSize, &cdata->m_pmtime);
+  stat_completion->release();
+  if (rc < 0) {
+    // nothing is really started so cancel everything
+    delete multi_completion;
+    delete cdata;
+    delete stat_completion;
+    return rc;
+  }
+  // use a regular AioCompletion for the getxattr async call
+  librados::AioCompletion *getxattr_completion =
+    librados::Rados::aio_create_completion(cdata,
+					   striper_stat_aio_getxattr_complete, 0);
+  multi_completion->add_request();
+  // in parallel, get the pmsize from the first object asynchronously
+  rc = m_ioCtx.aio_getxattr(firstObjOid, getxattr_completion,
+			    XATTR_SIZE, &cdata->bl);
+  getxattr_completion->release();
+  if (rc < 0) {
+    // the async stat is ongoing, so we need to go on
+    // we mark the getxattr as failed in the data object
+    cdata->m_getxattrRC = rc;
+    delete getxattr_completion;
+    multi_completion->complete();
+    return rc;
+  }
+}
+
+int libradosstriper::RadosStriperImpl::aio_stat(const std::string& soid,
+						librados::AioCompletion *c,
+						uint64_t *psize,
+						TimeType *pmtime)
+{
+  return aio_generic_stat<time_t, aio_stat>(soid, c, psize, pmtime);
+}
+
+int libradosstriper::RadosStriperImpl::stat2(const std::string& soid, uint64_t *psize, struct timespec *pts)
+{
+  // create a completion object
+  librados::AioCompletionImpl c;
+  // call asynchronous version of stat
+  int rc = aio_stat(soid, &c, psize, pts);
+  if (rc == 0) {
+    // wait for completion of the remove
+    c.wait_for_complete_and_cb();
+    // get result
+    rc = c.get_return_value();
+  }
+  return rc;
+}
+
+int libradosstriper::RadosStriperImpl::aio_stat2(const std::string& soid,
+						librados::AioCompletion *c,
+						uint64_t *psize,
+						struct timespec *pts)
+{
+  return aio_generic_stat<struct timespec, aio_stat2>(soid, c, psize, pmtime);
 }
 
 static void rados_req_remove_complete(rados_completion_t c, void *arg)
