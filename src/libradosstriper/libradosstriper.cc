@@ -264,11 +264,6 @@ int libradosstriper::RadosStriper::aio_read(const std::string& soid,
   return rados_striper_impl->aio_read(soid, c->pc, bl, len, off);
 }
 
-int libradosstriper::RadosStriper::aio_remove(const std::string& soid)
-{
-  return rados_striper_impl->remove(soid);
-}
-
 int libradosstriper::RadosStriper::stat(const std::string& soid, uint64_t *psize, time_t *pmtime)
 {
   return rados_striper_impl->stat(soid, psize, pmtime);
@@ -284,7 +279,7 @@ int libradosstriper::RadosStriper::aio_stat(const std::string& soid,
 
 int libradosstriper::RadosStriper::stat2(const std::string& soid, uint64_t *psize, struct timespec *pts)
 {
-  return rados_striper_impl->stat2(soid, psize, pmtime);
+  return rados_striper_impl->stat2(soid, psize, pts);
 }
 
 int libradosstriper::RadosStriper::aio_stat2(const std::string& soid,
@@ -292,7 +287,7 @@ int libradosstriper::RadosStriper::aio_stat2(const std::string& soid,
 					    uint64_t *psize,
 					    struct timespec *pts)
 {
-  return rados_striper_impl->aio_stat(soid, c->pc, psize, pts);
+  return rados_striper_impl->aio_stat2(soid, c->pc, psize, pts);
 }
 
 int libradosstriper::RadosStriper::remove(const std::string& soid)
@@ -303,7 +298,7 @@ int libradosstriper::RadosStriper::remove(const std::string& soid)
 int libradosstriper::RadosStriper::aio_remove(const std::string& soid,
 					      librados::AioCompletion *c)
 {
-  return rados_striper_impl->remove(soid, c->pc);
+  return rados_striper_impl->aio_remove(soid, c->pc);
 }
 
 int libradosstriper::RadosStriper::remove(const std::string& soid, int flags)
@@ -315,7 +310,7 @@ int libradosstriper::RadosStriper::aio_remove(const std::string& soid,
 					      librados::AioCompletion *c,
 					      int flags)
 {
-  return rados_striper_impl->remove(soid, c->pc, flags);
+  return rados_striper_impl->aio_remove(soid, c->pc, flags);
 }
 
 int libradosstriper::RadosStriper::trunc(const std::string& soid, uint64_t size)

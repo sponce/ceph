@@ -25,6 +25,7 @@
 #include "include/radosstriper/libradosstriper.hpp"
 
 #include "librados/IoCtxImpl.h"
+#include "librados/AioCompletionImpl.h"
 #include "common/RefCountedObj.h"
 
 struct libradosstriper::RadosStriperImpl {
@@ -128,13 +129,13 @@ struct libradosstriper::RadosStriperImpl {
    */
   struct BasicStatCompletionData : CompletionData {
     /// constructor
-    StatCompletionData(libradosstriper::RadosStriperImpl* striper,
-		       const std::string& soid,
-		       librados::AioCompletionImpl *userCompletion,
-		       librados::MultiAioCompletionImpl *multiCompletion,
-		       uint64_t *psize) :
+    BasicStatCompletionData(libradosstriper::RadosStriperImpl* striper,
+			    const std::string& soid,
+			    librados::AioCompletionImpl *userCompletion,
+			    libradosstriper::MultiAioCompletionImpl *multiCompletion,
+			    uint64_t *psize) :
       CompletionData(striper, soid, "", userCompletion),
-      m_psize(psize), m_multiCompletion(multiCompletion),
+      m_multiCompletion(multiCompletion), m_psize(psize),
       m_statRC(0), m_getxattrRC(0) {};
     // MultiAioCompletionImpl used to handle the double aysnc
     // call in the back (stat + getxattr)
@@ -148,9 +149,9 @@ struct libradosstriper::RadosStriperImpl {
     /// the bufferlist object used for the getxattr call
     bufferlist m_bl;
     /// return code of the stat
-    bool m_statRC;
+    int m_statRC;
     /// return code of the getxattr
-    bool m_getxattrRC;
+    int m_getxattrRC;
   };
 
   /**
@@ -166,7 +167,7 @@ struct libradosstriper::RadosStriperImpl {
     StatCompletionData(libradosstriper::RadosStriperImpl* striper,
 		       const std::string& soid,
 		       librados::AioCompletionImpl *userCompletion,
-		       librados::MultiAioCompletionImpl *multiCompletion,
+		       libradosstriper::MultiAioCompletionImpl *multiCompletion,
 		       uint64_t *psize,
 		       TimeType *pmtime) :
       BasicStatCompletionData(striper, soid, userCompletion, multiCompletion, psize),
@@ -295,6 +296,16 @@ struct libradosstriper::RadosStriperImpl {
   // stat, deletion and truncation
   int stat(const std::string& soid, uint64_t *psize, time_t *pmtime);
   int stat2(const std::string& soid, uint64_t *psize, struct timespec *pts);
+  template<class TimeType>
+  struct StatFunction {
+    typedef int (librados::IoCtxImpl::*Type) (const object_t& oid,
+					      librados::AioCompletionImpl *c,
+					      uint64_t *psize, TimeType *pmtime);
+  };
+  template<class TimeType>
+  int aio_generic_stat(const std::string& soid, librados::AioCompletionImpl *c,
+		       uint64_t *psize, TimeType *pmtime,
+		       typename StatFunction<TimeType>::Type statFunction);
   int aio_stat(const std::string& soid, librados::AioCompletionImpl *c,
 	       uint64_t *psize, time_t *pmtime);
   int aio_stat2(const std::string& soid, librados::AioCompletionImpl *c,

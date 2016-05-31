@@ -124,7 +124,10 @@ libradosstriper::RadosStriperImpl::CompletionData::CompletionData
   RefCountedObject(striper->cct(), n),
   m_striper(striper), m_soid(soid), m_lockCookie(lockCookie), m_ack(0) {
   m_striper->get();
-  if (userCompletion) m_ack = new librados::IoCtxImpl::C_aio_Ack(userCompletion);
+  if (userCompletion) {
+    m_ack = new librados::IoCtxImpl::C_aio_Ack(userCompletion);
+    userCompletion->io = striper->m_ioCtxImpl;
+  }
 }
 
 libradosstriper::RadosStriperImpl::CompletionData::~CompletionData() {
@@ -579,7 +582,7 @@ int libradosstriper::RadosStriperImpl::stat(const std::string& soid, uint64_t *p
   int rc = aio_stat(soid, &c, psize, pmtime);
   if (rc == 0) {
     // wait for completion of the remove
-    c.wait_for_complete_and_cb();
+    c.wait_for_complete();
     // get result
     rc = c.get_return_value();
   }
@@ -594,8 +597,7 @@ static void striper_stat_aio_stat_complete(rados_completion_t c, void *arg) {
     // remember this has failed
     data->m_statRC = rc;
   }
-  ((librados::AioCompletionImpl*)c)->put();
-  data->m_multiCompletion->complete();
+  data->m_multiCompletion->complete_request(rc);
 }
 
 static void striper_stat_aio_getxattr_complete(rados_completion_t c, void *arg) {
@@ -603,7 +605,7 @@ static void striper_stat_aio_getxattr_complete(rados_completion_t c, void *arg) 
   reinterpret_cast<libradosstriper::RadosStriperImpl::BasicStatCompletionData*>(arg);
   int rc = rados_aio_get_return_value(c);
   // We need to handle the case of sparse files here
-  if (rc) {
+  if (rc < 0) {
     // remember this has failed
     data->m_getxattrRC = rc;
   } else {
@@ -615,24 +617,34 @@ static void striper_stat_aio_getxattr_complete(rados_completion_t c, void *arg) 
       lderr(data->m_striper->cct()) << XATTR_SIZE << " : " << err << dendl;
       data->m_getxattrRC = -EINVAL;
     }
+    rc = 0;
   }
-  ((librados::AioCompletionImpl*)c)->put();  
-  data->m_multiCompletion->complete();
+  data->m_multiCompletion->complete_request(rc);
 }
 
 static void striper_stat_aio_req_complete(rados_striper_multi_completion_t c,
 					  void *arg) {
   libradosstriper::RadosStriperImpl::BasicStatCompletionData *data =
   reinterpret_cast<libradosstriper::RadosStriperImpl::BasicStatCompletionData*>(arg);
-  data->complete(data->m_statRC ? data->m_statRC : data->m_getxattrRC);
+  if (data->m_statRC) {
+    data->complete(data->m_statRC);
+  } else {
+    if (data->m_getxattrRC < 0) {
+      data->complete(data->m_getxattrRC);
+    } else {
+      data->complete(0);
+    }
+  }
   data->put();
 }
 
-template<TimeType, statFunction>
-int libradosstriper::RadosStriperImpl::aio_generic_stat(const std::string& soid,
-							librados::AioCompletion *c,
-							uint64_t *psize,
-							TimeType *pmtime)
+template<class TimeType>
+int libradosstriper::RadosStriperImpl::aio_generic_stat
+(const std::string& soid,
+ librados::AioCompletionImpl *c,
+ uint64_t *psize,
+ TimeType *pmtime,
+ typename libradosstriper::RadosStriperImpl::StatFunction<TimeType>::Type statFunction)
 {
   // use a MultiAioCompletion object for dealing with the fact
   // that we'll do 2 asynchronous calls in parallel
@@ -649,8 +661,9 @@ int libradosstriper::RadosStriperImpl::aio_generic_stat(const std::string& soid,
     librados::Rados::aio_create_completion(cdata,
 					   striper_stat_aio_stat_complete, 0);
   multi_completion->add_request();
-  int rc = m_ioCtx.statFunction(firstObjOid, stat_completion,
-				&cdata->m_objectSize, &cdata->m_pmtime);
+  object_t obj(firstObjOid);
+  int rc = (m_ioCtxImpl->*statFunction)(obj, stat_completion->pc,
+					&cdata->m_objectSize, cdata->m_pmtime);
   stat_completion->release();
   if (rc < 0) {
     // nothing is really started so cancel everything
@@ -665,25 +678,27 @@ int libradosstriper::RadosStriperImpl::aio_generic_stat(const std::string& soid,
 					   striper_stat_aio_getxattr_complete, 0);
   multi_completion->add_request();
   // in parallel, get the pmsize from the first object asynchronously
-  rc = m_ioCtx.aio_getxattr(firstObjOid, getxattr_completion,
-			    XATTR_SIZE, &cdata->bl);
+  rc = m_ioCtxImpl->aio_getxattr(obj, getxattr_completion->pc,
+				 XATTR_SIZE, cdata->m_bl);
   getxattr_completion->release();
+  multi_completion->finish_adding_requests();
   if (rc < 0) {
     // the async stat is ongoing, so we need to go on
     // we mark the getxattr as failed in the data object
     cdata->m_getxattrRC = rc;
     delete getxattr_completion;
-    multi_completion->complete();
+    multi_completion->complete_request(rc);
     return rc;
   }
+  return 0;
 }
 
 int libradosstriper::RadosStriperImpl::aio_stat(const std::string& soid,
-						librados::AioCompletion *c,
+						librados::AioCompletionImpl *c,
 						uint64_t *psize,
-						TimeType *pmtime)
+						time_t *pmtime)
 {
-  return aio_generic_stat<time_t, aio_stat>(soid, c, psize, pmtime);
+  return aio_generic_stat<time_t>(soid, c, psize, pmtime, &librados::IoCtxImpl::aio_stat);
 }
 
 int libradosstriper::RadosStriperImpl::stat2(const std::string& soid, uint64_t *psize, struct timespec *pts)
@@ -691,7 +706,7 @@ int libradosstriper::RadosStriperImpl::stat2(const std::string& soid, uint64_t *
   // create a completion object
   librados::AioCompletionImpl c;
   // call asynchronous version of stat
-  int rc = aio_stat(soid, &c, psize, pts);
+  int rc = aio_stat2(soid, &c, psize, pts);
   if (rc == 0) {
     // wait for completion of the remove
     c.wait_for_complete_and_cb();
@@ -702,11 +717,11 @@ int libradosstriper::RadosStriperImpl::stat2(const std::string& soid, uint64_t *
 }
 
 int libradosstriper::RadosStriperImpl::aio_stat2(const std::string& soid,
-						librados::AioCompletion *c,
+						librados::AioCompletionImpl *c,
 						uint64_t *psize,
 						struct timespec *pts)
 {
-  return aio_generic_stat<struct timespec, aio_stat2>(soid, c, psize, pmtime);
+  return aio_generic_stat<struct timespec>(soid, c, psize, pts, &librados::IoCtxImpl::aio_stat2);
 }
 
 static void rados_req_remove_complete(rados_completion_t c, void *arg)
@@ -778,6 +793,9 @@ int libradosstriper::RadosStriperImpl::aio_remove(const std::string& soid,
       new libradosstriper::MultiAioCompletionImpl;
     multi_completion->set_complete_callback(cdata, striper_remove_aio_req_complete);
     // call asynchronous internal version of remove
+    ldout(cct(), 10)
+      << "RadosStriperImpl : Aio_remove starting for "
+      << soid << dendl;
     return internal_aio_remove(soid, multi_completion);
   } catch (ErrorCode &e) {
     return e.m_code;
